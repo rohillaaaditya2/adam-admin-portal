@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <defs>
+    <linearGradient id="aneGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#be185d" />
+      <stop offset="100%" stop-color="#831843" />
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8" fill="url(#aneGrad)" />
+  <!-- Heart Icon -->
+  <path d="M16 26.5c-.3 0-.6-.1-.8-.3C14.7 25.8 7 19.8 7 13.8 7 10.6 9.4 8 12.5 8c1.6 0 3 .6 4 1.7.9-1.1 2.4-1.7 4-1.7 3.1 0 5.5 2.6 5.5 5.8 0 6-7.7 12-8.2 12.4-.2.2-.5.3-.8.3z" fill="#ffffff" opacity="0.95" />
+  <!-- Christian Cross Accent in Heart -->
+  <rect x="15" y="11" width="2" height="9" rx="0.5" fill="#be185d" />
+  <rect x="12.5" y="13.5" width="7" height="2" rx="0.5" fill="#be185d" />
+</svg>
