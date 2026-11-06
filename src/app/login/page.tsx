@@ -1,91 +1,119 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
-import Link from 'next/link';
-import { ShieldCheck, ArrowRight, ShieldAlert, ArrowLeft, Eye, EyeOff, Terminal, Lock } from 'lucide-react';
-import { api, post, setAdminToken, setToken, getAdminToken } from '@/lib/api';
-import CaptchaField, { CaptchaData } from '@/components/CaptchaField';
+import { ShieldCheck, ArrowRight, Eye, EyeOff, Lock, Mail, KeyRound, RefreshCw } from 'lucide-react';
+import { post, setAdminToken, getAdminToken } from '@/lib/api';
 
 export default function AdminLogin() {
+  const [step, setStep] = useState<'CREDENTIALS' | 'OTP'>('CREDENTIALS');
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
+  const [otp, setOtp] = useState('');
+  const [maskedEmail, setMaskedEmail] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [captchaData, setCaptchaData] = useState<CaptchaData>({ captchaToken: '', captchaAnswer: '' });
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
-  const [mounted, setMounted] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [countdown, setCountdown] = useState(0);
 
-  const [activeSession, setActiveSession] = useState<{ phone: string; role: string } | null>(null);
-
-  function quickFillAdmin() {
-    setPhone('9000000001');
-    setPassword('AdminPass123!Secure');
-    setErr('');
-  }
-
-  function handleSignOutSession() {
-    localStorage.removeItem('ane_admin_token');
-    setActiveSession(null);
-  }
+  const phoneRef = useRef<HTMLInputElement>(null);
+  const otpRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setMounted(true);
-    // Check if there is an existing session, but do NOT auto-redirect away
+    // If already logged in, redirect straight to operations
     const token = getAdminToken();
     if (token) {
-      api('/auth/me', { headers: { Authorization: `Bearer ${token}` } })
-        .then((d: any) => {
-          if (d?.user && (d.user.role === 'admin' || d.user.role === 'moderator')) {
-            setActiveSession({ phone: d.user.phone, role: d.user.role });
-          } else {
-            localStorage.removeItem('ane_admin_token');
-            setActiveSession(null);
-          }
-        })
-        .catch(() => {
-          localStorage.removeItem('ane_admin_token');
-          setActiveSession(null);
-        });
+      window.location.href = '/operations';
+      return;
     }
-
-    if (typeof window !== 'undefined' && window.location.search.includes('demo=true')) {
-      quickFillAdmin();
-    }
-
-    // Auto-focus phone input
-    setTimeout(() => inputRef.current?.focus(), 300);
+    setTimeout(() => phoneRef.current?.focus(), 300);
   }, []);
 
-  async function submit(e: React.FormEvent) {
+  useEffect(() => {
+    if (countdown > 0) {
+      const timer = setTimeout(() => setCountdown(c => c - 1), 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [countdown]);
+
+  // Step 1: Submit Phone & Password (No CAPTCHA) -> Brevo sends OTP to Gmail
+  async function handleCredentialsSubmit(e: React.FormEvent) {
     e.preventDefault();
     const cleanPhone = phone.replace(/[\s\-\(\)\.]/g, '').trim();
-    if (!cleanPhone || !/^\+?[0-9]{10,15}$/.test(cleanPhone)) {
-      return setErr('Please enter a valid staff mobile number');
+    if (!cleanPhone || cleanPhone.length < 10) {
+      return setErr('Please enter your registered staff mobile number');
     }
-    if (!password || password.length < 6) {
+    if (!password) {
       return setErr('Please enter your administrative password');
     }
-    if (!captchaData.captchaAnswer.trim()) {
-      return setErr('Please complete the security CAPTCHA verification');
-    }
+
     setBusy(true);
     setErr('');
     try {
-      const d: any = await post('/auth/login', {
+      const res: any = await post('/admin/auth/request-login', {
         phone: cleanPhone,
-        password: password.trim(),
-        captchaToken: captchaData.captchaToken,
-        captchaAnswer: captchaData.captchaAnswer.trim(),
-        hp_trap: captchaData.hp_trap
+        password: password.trim()
       });
-      if (d?.user?.role !== 'admin' && d?.user?.role !== 'moderator') {
-        throw new Error('Access denied. This console is strictly restricted to authorized staff & administrators.');
+
+      if (res?.ok && res?.step === 'OTP_REQUIRED') {
+        setMaskedEmail(res.maskedEmail || 'your registered Gmail');
+        setStep('OTP');
+        setCountdown(60);
+        setTimeout(() => otpRef.current?.focus(), 300);
+      } else {
+        setErr(res?.error || 'Authentication failed');
       }
-      setAdminToken(d.token);
-      setToken(d.token);
-      location.href = '/admin/operations';
-    } catch (x: any) {
-      setErr(x.message || 'Authentication failed. Please verify credentials.');
+    } catch (e: any) {
+      setErr(e?.message || 'Invalid administrative credentials or server error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Step 2: Verify 6-digit OTP received on Gmail
+  async function handleOtpSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const cleanOtp = otp.trim();
+    if (!cleanOtp || cleanOtp.length !== 6) {
+      return setErr('Please enter the complete 6-digit code received on your Gmail');
+    }
+
+    setBusy(true);
+    setErr('');
+    try {
+      const res: any = await post('/admin/auth/verify-otp', {
+        phone: phone.replace(/[\s\-\(\)\.]/g, '').trim(),
+        otp: cleanOtp
+      });
+
+      if (res?.ok && res?.token) {
+        setAdminToken(res.token);
+        window.location.href = '/operations';
+      } else {
+        setErr(res?.error || 'Invalid verification code');
+      }
+    } catch (e: any) {
+      setErr(e?.message || 'Invalid or expired verification code');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Resend OTP
+  async function handleResendOtp() {
+    if (countdown > 0 || busy) return;
+    setBusy(true);
+    setErr('');
+    try {
+      const res: any = await post('/admin/auth/request-login', {
+        phone: phone.replace(/[\s\-\(\)\.]/g, '').trim(),
+        password: password.trim()
+      });
+      if (res?.ok) {
+        setCountdown(60);
+      } else {
+        setErr(res?.error || 'Could not resend OTP');
+      }
+    } catch (e: any) {
+      setErr(e?.message || 'Resend failed');
     } finally {
       setBusy(false);
     }
@@ -94,339 +122,288 @@ export default function AdminLogin() {
   return (
     <div style={{
       minHeight: '100vh',
-      background: 'radial-gradient(ellipse at top, #1e1b4b 0%, #0f172a 45%, #020617 100%)',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      padding: '24px 16px',
-      fontFamily: "'Outfit', 'Plus Jakarta Sans', system-ui, sans-serif",
-      position: 'relative',
-      overflow: 'hidden'
+      background: 'radial-gradient(circle at 50% 20%, #1e293b 0%, #0f172a 100%)',
+      padding: '24px',
+      fontFamily: "'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      color: '#ffffff'
     }}>
-      {/* Background ambient lighting */}
       <div style={{
-        position: 'absolute', top: '-15%', left: '50%', transform: 'translateX(-50%)',
-        width: '600px', height: '400px',
-        background: 'radial-gradient(circle, rgba(194, 24, 91, 0.22) 0%, transparent 70%)',
-        borderRadius: '50%', pointerEvents: 'none'
-      }} />
-
-      <style>{`
-        @keyframes floatCard {
-          from { opacity: 0; transform: translateY(18px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        .admin-box {
-          animation: floatCard 0.4s ease-out forwards;
-        }
-        .admin-input-field {
-          width: 100%;
-          padding: 13px 16px;
-          border-radius: 12px;
-          background: rgba(15, 23, 42, 0.75);
-          border: 1.5px solid rgba(255, 255, 255, 0.12);
-          color: #f8fafc;
-          font-size: 14px;
-          outline: none;
-          box-sizing: border-box;
-          transition: all 0.2s ease;
-        }
-        .admin-input-field:focus {
-          border-color: #ec4899;
-          background: rgba(15, 23, 42, 0.95);
-          box-shadow: 0 0 0 3px rgba(236, 72, 153, 0.2);
-        }
-        .admin-btn {
-          width: 100%;
-          padding: 14px;
-          border-radius: 12px;
-          border: none;
-          background: linear-gradient(135deg, #c2185b 0%, #831843 100%);
-          color: #ffffff;
-          font-size: 15px;
-          font-weight: 700;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 10px;
-          box-shadow: 0 10px 25px rgba(194, 24, 91, 0.4);
-          transition: all 0.2s;
-        }
-        .admin-btn:hover:not(:disabled) {
-          transform: translateY(-1px);
-          box-shadow: 0 14px 30px rgba(194, 24, 91, 0.55);
-        }
-        .admin-btn:disabled {
-          opacity: 0.6;
-          cursor: not-allowed;
-        }
-      `}</style>
-
-      <div className="admin-box" style={{
         width: '100%',
-        maxWidth: '440px',
-        background: 'rgba(30, 41, 59, 0.85)',
+        maxWidth: '420px',
+        background: 'rgba(30, 41, 59, 0.75)',
         backdropFilter: 'blur(20px)',
-        WebkitBackdropFilter: 'blur(20px)',
-        border: '1px solid rgba(255, 255, 255, 0.12)',
+        border: '1px solid rgba(255, 255, 255, 0.1)',
         borderRadius: '24px',
-        padding: '36px 30px',
-        boxShadow: '0 25px 60px rgba(0, 0, 0, 0.6)',
-        position: 'relative',
-        zIndex: 10
+        padding: '36px 32px',
+        boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)'
       }}>
 
-        {/* Security badge & Icon */}
+        {/* Brand Header */}
         <div style={{ textAlign: 'center', marginBottom: '28px' }}>
           <div style={{
-            width: '60px', height: '60px',
+            width: '56px',
+            height: '56px',
+            margin: '0 auto 16px',
             borderRadius: '16px',
-            background: 'linear-gradient(135deg, #c2185b 0%, #880e4f 100%)',
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 8px 24px rgba(194, 24, 91, 0.45)',
-            marginBottom: '16px'
-          }}>
-            <ShieldCheck size={32} color="#ffffff" />
-          </div>
-
-          <div style={{
-            display: 'inline-flex', alignItems: 'center', gap: '6px',
-            background: 'rgba(236, 72, 153, 0.12)',
-            border: '1px solid rgba(236, 72, 153, 0.3)',
-            color: '#f472b6',
-            fontSize: '11px', fontWeight: 800, letterSpacing: '0.08em',
-            padding: '4px 12px', borderRadius: '20px', marginBottom: '10px'
-          }}>
-            <Terminal size={12} />
-            DEDICATED ADMIN CONSOLE
-          </div>
-
-          <h1 style={{ fontSize: '24px', fontWeight: 800, margin: '0 0 6px', color: '#ffffff' }}>
-            Administrative Login
-          </h1>
-          <p style={{ fontSize: '13px', color: '#94a3b8', margin: 0, lineHeight: 1.5 }}>
-            Adam N Eve Matrimony · Internal Staff & Moderator Access
-          </p>
-        </div>
-
-        {/* Error notification */}
-        {err && (
-          <div style={{
-            display: 'flex', alignItems: 'flex-start', gap: '10px',
-            background: 'rgba(239, 68, 68, 0.12)',
-            border: '1px solid rgba(239, 68, 68, 0.35)',
-            borderRadius: '12px', padding: '12px 14px', marginBottom: '20px',
-            color: '#fca5a5', fontSize: '13px', lineHeight: 1.5
-          }}>
-            <ShieldAlert size={18} style={{ flexShrink: 0, marginTop: 1 }} />
-            <span>{err}</span>
-          </div>
-        )}
-
-        {/* Active Session Notification */}
-        {activeSession && (
-          <div
-            style={{
-              background: 'rgba(16, 185, 129, 0.12)',
-              border: '1.5px solid rgba(16, 185, 129, 0.35)',
-              borderRadius: '14px',
-              padding: '14px 16px',
-              marginBottom: '18px'
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-              <span style={{ fontSize: '11px', fontWeight: 800, color: '#34d399', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                Active Admin Session Detected
-              </span>
-              <span style={{ fontSize: '11px', color: '#a7f3d0', fontWeight: 700 }}>
-                {activeSession.phone}
-              </span>
-            </div>
-            <p style={{ margin: '0 0 12px', fontSize: '12px', color: '#cbd5e1', lineHeight: 1.5 }}>
-              You are currently logged in with staff privileges ({activeSession.role}).
-            </p>
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-              <Link
-                href="/admin/operations"
-                style={{
-                  background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-                  color: '#ffffff',
-                  padding: '7px 14px',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                  fontWeight: 700,
-                  textDecoration: 'none',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '4px'
-                }}
-              >
-                Go to Dashboard →
-              </Link>
-              <button
-                type="button"
-                onClick={handleSignOutSession}
-                style={{
-                  background: 'rgba(239, 68, 68, 0.15)',
-                  border: '1px solid rgba(239, 68, 68, 0.35)',
-                  color: '#fca5a5',
-                  padding: '7px 14px',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  cursor: 'pointer'
-                }}
-              >
-                Sign Out / Switch Account
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Staff Test Account Quick Fill */}
-        <div
-          style={{
-            background: 'rgba(56, 189, 248, 0.08)',
-            border: '1px solid rgba(56, 189, 248, 0.22)',
-            borderRadius: '12px',
-            padding: '10px 14px',
-            marginBottom: '18px',
+            background: 'linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%)',
             display: 'flex',
             alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '10px'
-          }}
-        >
-          <div>
-            <div style={{ fontSize: '11px', fontWeight: 700, color: '#38bdf8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Staff Test Account
-            </div>
-            <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '2px' }}>
-              Phone: <b>9000000001</b>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={quickFillAdmin}
-            style={{
-              background: 'rgba(56, 189, 248, 0.18)',
-              border: '1px solid rgba(56, 189, 248, 0.4)',
-              color: '#38bdf8',
-              borderRadius: '8px',
-              padding: '6px 12px',
-              fontSize: '11px',
-              fontWeight: 700,
-              cursor: 'pointer'
-            }}
-          >
-            Auto-Fill
-          </button>
-        </div>
-
-        {/* Credentials Form */}
-        <form onSubmit={submit} action="javascript:void(0);" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-
-          {/* Staff ID */}
-          <div>
-            <label style={{
-              display: 'block', fontSize: '12px', fontWeight: 700,
-              color: '#cbd5e1', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em'
-            }}>
-              Admin / Staff Mobile
-            </label>
-            <input
-              ref={inputRef}
-              type="tel"
-              className="admin-input-field"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              placeholder="e.g. 9000000001"
-              maxLength={15}
-              autoComplete="off"
-              required
-            />
-          </div>
-
-          {/* Password with eye toggle */}
-          <div>
-            <label style={{
-              display: 'block', fontSize: '12px', fontWeight: 700,
-              color: '#cbd5e1', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em'
-            }}>
-              Password
-            </label>
-            <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-              <input
-                type={showPassword ? 'text' : 'password'}
-                className="admin-input-field"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter password"
-                autoComplete="current-password"
-                required
-                style={{ paddingRight: '44px' }}
-              />
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                aria-label={showPassword ? 'Hide password' : 'Show password'}
-                style={{
-                  position: 'absolute', right: '12px',
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: '#94a3b8', padding: '4px',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center'
-                }}
-              >
-                {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-              </button>
-            </div>
-          </div>
-
-          {/* Security Captcha Field */}
-          <div style={{
-            background: 'rgba(15, 23, 42, 0.6)',
-            padding: '14px', borderRadius: '12px',
-            border: '1px solid rgba(255, 255, 255, 0.08)'
+            justifyContent: 'center',
+            color: '#ffffff',
+            boxShadow: '0 8px 24px rgba(14, 165, 233, 0.35)'
           }}>
-            <CaptchaField onChange={setCaptchaData} disabled={busy} value={captchaData.captchaAnswer} />
+            <ShieldCheck size={30} />
           </div>
-
-          {/* Submit button */}
-          <button type="submit" className="admin-btn" disabled={busy}>
-            {busy ? 'Authenticating...' : (
-              <>
-                <Lock size={16} /> Sign In to Admin Console <ArrowRight size={16} />
-              </>
-            )}
-          </button>
-        </form>
-
-        {/* Security warning notice */}
-        <div style={{
-          marginTop: '22px', padding: '12px 14px',
-          background: 'rgba(15, 23, 42, 0.5)',
-          border: '1px solid rgba(255, 255, 255, 0.06)',
-          borderRadius: '12px', textAlign: 'center'
-        }}>
-          <p style={{ margin: 0, fontSize: '11px', color: '#64748b', lineHeight: 1.5 }}>
-            🛡️ Authorized personnel only. All access attempts are recorded with timestamp and IP address.
+          <h1 style={{ margin: 0, fontSize: '22px', fontWeight: 800, letterSpacing: '-0.02em', color: '#f8fafc' }}>
+            Administrative Console
+          </h1>
+          <p style={{ margin: '6px 0 0', fontSize: '13px', color: '#94a3b8' }}>
+            {step === 'CREDENTIALS' ? 'Secure Staff Sign-In' : 'Gmail 2FA Verification'}
           </p>
         </div>
 
-        {/* Back link */}
-        <div style={{ marginTop: '20px', textAlign: 'center' }}>
-          <Link
-            href="/login"
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: '6px',
-              color: '#94a3b8', fontSize: '12px', textDecoration: 'none',
-              transition: 'color 0.2s'
-            }}
-          >
-            <ArrowLeft size={13} /> Switch to User / Member Login
-          </Link>
+        {/* Error message */}
+        {err && (
+          <div style={{
+            background: 'rgba(239, 68, 68, 0.15)',
+            border: '1px solid rgba(239, 68, 68, 0.35)',
+            borderRadius: '12px',
+            padding: '12px 16px',
+            marginBottom: '20px',
+            fontSize: '13px',
+            color: '#fca5a5',
+            lineHeight: 1.4
+          }}>
+            {err}
+          </div>
+        )}
+
+        {/* STEP 1: Phone + Password (No CAPTCHA) */}
+        {step === 'CREDENTIALS' && (
+          <form onSubmit={handleCredentialsSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: '#cbd5e1', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Admin Phone
+              </label>
+              <input
+                ref={phoneRef}
+                type="tel"
+                value={phone}
+                onChange={e => setPhone(e.target.value)}
+                placeholder="e.g. 9876543210"
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  borderRadius: '12px',
+                  background: 'rgba(15, 23, 42, 0.6)',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  color: '#ffffff',
+                  fontSize: '14px',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+                required
+              />
+            </div>
+
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: '#cbd5e1', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Password
+              </label>
+              <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="Enter administrator password"
+                  style={{
+                    width: '100%',
+                    padding: '12px 46px 12px 16px',
+                    borderRadius: '12px',
+                    background: 'rgba(15, 23, 42, 0.6)',
+                    border: '1px solid rgba(255, 255, 255, 0.12)',
+                    color: '#ffffff',
+                    fontSize: '14px',
+                    outline: 'none',
+                    boxSizing: 'border-box'
+                  }}
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  style={{
+                    position: 'absolute',
+                    right: '12px',
+                    background: 'none',
+                    border: 'none',
+                    color: '#94a3b8',
+                    cursor: 'pointer',
+                    padding: '4px'
+                  }}
+                >
+                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={busy}
+              style={{
+                marginTop: '8px',
+                width: '100%',
+                padding: '14px',
+                borderRadius: '12px',
+                background: 'linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%)',
+                border: 'none',
+                color: '#ffffff',
+                fontWeight: 700,
+                fontSize: '14px',
+                cursor: busy ? 'not-allowed' : 'pointer',
+                opacity: busy ? 0.7 : 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                boxShadow: '0 4px 16px rgba(14, 165, 233, 0.3)'
+              }}
+            >
+              {busy ? (
+                <>
+                  <RefreshCw size={16} className="animate-spin" /> Verifying Credentials...
+                </>
+              ) : (
+                <>
+                  <Lock size={16} /> Continue to 2FA <ArrowRight size={16} />
+                </>
+              )}
+            </button>
+          </form>
+        )}
+
+        {/* STEP 2: Gmail Brevo OTP */}
+        {step === 'OTP' && (
+          <form onSubmit={handleOtpSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+            <div style={{
+              background: 'rgba(14, 165, 233, 0.12)',
+              border: '1px solid rgba(14, 165, 233, 0.3)',
+              borderRadius: '12px',
+              padding: '14px',
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '12px'
+            }}>
+              <Mail size={20} color="#38bdf8" style={{ flexShrink: 0, marginTop: '2px' }} />
+              <div style={{ fontSize: '12.5px', color: '#e0f2fe', lineHeight: 1.5 }}>
+                A 6-digit login code has been sent via Brevo to your Gmail: <b style={{ color: '#ffffff' }}>{maskedEmail}</b>
+              </div>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: '#cbd5e1', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Enter 6-Digit Code
+              </label>
+              <input
+                ref={otpRef}
+                type="text"
+                maxLength={6}
+                value={otp}
+                onChange={e => setOtp(e.target.value.replace(/\D/g, ''))}
+                placeholder="• • • • • •"
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  borderRadius: '12px',
+                  background: 'rgba(15, 23, 42, 0.6)',
+                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  color: '#ffffff',
+                  fontSize: '22px',
+                  fontWeight: 800,
+                  letterSpacing: '10px',
+                  textAlign: 'center',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+                required
+              />
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '12px' }}>
+              <button
+                type="button"
+                onClick={() => { setStep('CREDENTIALS'); setErr(''); }}
+                style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 0 }}
+              >
+                ← Back to Login
+              </button>
+              <button
+                type="button"
+                onClick={handleResendOtp}
+                disabled={countdown > 0 || busy}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: countdown > 0 ? '#64748b' : '#38bdf8',
+                  cursor: countdown > 0 ? 'not-allowed' : 'pointer',
+                  fontWeight: 600
+                }}
+              >
+                {countdown > 0 ? `Resend Code (${countdown}s)` : 'Resend Code'}
+              </button>
+            </div>
+
+            <button
+              type="submit"
+              disabled={busy}
+              style={{
+                marginTop: '4px',
+                width: '100%',
+                padding: '14px',
+                borderRadius: '12px',
+                background: 'linear-gradient(135deg, #10b981 0%, #059669 1000%)',
+                border: 'none',
+                color: '#ffffff',
+                fontWeight: 700,
+                fontSize: '14px',
+                cursor: busy ? 'not-allowed' : 'pointer',
+                opacity: busy ? 0.7 : 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                boxShadow: '0 4px 16px rgba(16, 185, 129, 0.3)'
+              }}
+            >
+              {busy ? (
+                <>
+                  <RefreshCw size={16} className="animate-spin" /> Authenticating...
+                </>
+              ) : (
+                <>
+                  <KeyRound size={16} /> Verify & Access Console
+                </>
+              )}
+            </button>
+          </form>
+        )}
+
+        <div style={{
+          marginTop: '24px',
+          padding: '10px 14px',
+          background: 'rgba(15, 23, 42, 0.4)',
+          border: '1px solid rgba(255, 255, 255, 0.05)',
+          borderRadius: '10px',
+          textAlign: 'center',
+          fontSize: '11px',
+          color: '#64748b'
+        }}>
+          🛡️ Brevo 2FA Secured Administrative Gateway
         </div>
+
       </div>
     </div>
   );
